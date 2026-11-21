@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF Page Picker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<style>
+  :root{--bg:#eef1f4;--ink:#17202a;--muted:#5d6b7a;--accent:#0057ff;--line:#b7c2cf;--ok:#0a7a3d;--err:#c0262d;--card:#fff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:"Bricolage Grotesque",system-ui,sans-serif;line-height:1.5;min-height:100vh}
+  main{max-width:640px;margin:0 auto;padding:28px 18px 60px}
+  h1{font-size:clamp(2rem,8vw,3rem);line-height:1;margin:0 0 8px;font-weight:800;letter-spacing:-.03em}
+  .lead{color:var(--muted);margin:0 0 28px}
+  section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;margin-bottom:16px}
+  section[hidden]{display:none}
+  h2{font-size:1.05rem;margin:0 0 12px;font-weight:600}
+  #drop{display:block;border:2px dashed var(--line);border-radius:8px;padding:34px 16px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s}
+  #drop:hover,#drop.over,#drop:focus-within{border-color:var(--accent);background:#f3f7ff}
+  #drop strong{display:block;font-size:1.1rem}
+  #drop span{color:var(--muted);font-size:.9rem}
+  #file{position:absolute;opacity:0;width:1px;height:1px}
+  .meta{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-top:14px}
+  .meta b{word-break:break-all}
+  .pill{background:var(--ink);color:#fff;border-radius:99px;padding:2px 12px;font-size:.85rem;white-space:nowrap}
+  label{display:block;font-size:.9rem;color:var(--muted);margin-bottom:6px}
+  input[type=number]{font:inherit;width:100%;padding:11px 12px;border:1.5px solid var(--line);border-radius:8px;background:#fff;color:var(--ink)}
+  input[type=number]:focus{outline:3px solid #b9d0ff;border-color:var(--accent)}
+  .row{display:flex;gap:10px;align-items:flex-end}
+  .row>div{flex:1}
+  button{font:inherit;font-weight:600;padding:11px 18px;border-radius:8px;border:0;background:var(--accent);color:#fff;cursor:pointer}
+  button:hover{filter:brightness(1.08)}
+  button:focus-visible{outline:3px solid #b9d0ff;outline-offset:2px}
+  button.ghost{background:transparent;color:var(--accent);border:1.5px solid var(--accent)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  #fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:12px;margin:4px 0 16px}
+  #fields input.bad{border-color:var(--err);background:#fff4f4}
+  #msg{margin:12px 0 0;min-height:1.4em;font-size:.95rem}
+  #msg.err{color:var(--err)} #msg.ok{color:var(--ok)}
+  footer{color:var(--muted);font-size:.85rem;margin-top:24px}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<main>
+  <h1>PDF Page Picker</h1>
+  <p class="lead">Pick any pages from a PDF, in any order, and save them as one new PDF. Everything runs in your browser. Your file is never uploaded.</p>
+
+  <section id="s1">
+    <h2>Choose a PDF</h2>
+    <label id="drop" for="file">
+      <strong>Tap to choose a PDF, or drop it here</strong>
+      <span>Works with files from your computer or phone</span>
+      <input id="file" type="file" accept="application/pdf,.pdf">
+    </label>
+    <div class="meta" id="info" hidden><b id="fname"></b><span class="pill" id="pcount"></span></div>
+    <p id="msg1" class="err" role="alert"></p>
+  </section>
+
+  <section id="s2" hidden>
+    <h2>How many pages do you want?</h2>
+    <div class="row">
+      <div>
+        <label for="count">Number of pages to extract</label>
+        <input id="count" type="number" min="1" inputmode="numeric" placeholder="e.g. 4">
+      </div>
+      <button id="makeFields" type="button">Continue</button>
+    </div>
+  </section>
+
+  <section id="s3" hidden>
+    <h2>Enter the page numbers</h2>
+    <label>Pages are added to the new PDF in the order you enter them. Valid range: <span id="range"></span>.</label>
+    <div id="fields"></div>
+    <button id="go" type="button">Create PDF</button>
+    <p id="msg" role="status"></p>
+    <p><a id="dl" hidden></a></p>
+  </section>
+
+  <footer>Tip: repeat a number to include that page twice.</footer>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let srcDoc = null, srcName = "", total = 0, lastUrl = null;
+
+function setMsg(el, text, cls){ el.textContent = text; el.className = cls || ""; }
+
+async function loadFile(file){
+  const m1 = $("msg1"); setMsg(m1, "");
+  ["s2","s3"].forEach(i => $(i).hidden = true);
+  $("info").hidden = true; srcDoc = null;
+  if(!file) return;
+  if(file.type !== "application/pdf" && !/\.pdf$/i.test(file.name)){
+    return setMsg(m1, "That isn't a PDF. Choose a file ending in .pdf.", "err");
+  }
+  try{
+    const bytes = await file.arrayBuffer();
+    srcDoc = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+    total = srcDoc.getPageCount(); srcName = file.name.replace(/\.pdf$/i, "");
+    $("fname").textContent = file.name;
+    $("pcount").textContent = total + (total === 1 ? " page" : " pages");
+    $("info").hidden = false;
+    $("count").max = total; $("count").value = "";
+    $("range").textContent = "1 to " + total;
+    $("s2").hidden = false;
+    $("count").focus({preventScroll:true});
+  }catch(e){
+    setMsg(m1, "Couldn't open this PDF. It may be damaged or password-protected.", "err");
+  }
+}
+
+$("file").addEventListener("change", e => loadFile(e.target.files[0]));
+const drop = $("drop");
+["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", e => loadFile(e.dataTransfer.files[0]));
+
+$("makeFields").addEventListener("click", () => {
+  const n = parseInt($("count").value, 10);
+  const box = $("fields"); box.innerHTML = ""; $("dl").hidden = true; setMsg($("msg"), "");
+  if(!Number.isInteger(n) || n < 1){
+    $("s3").hidden = true;
+    return alert("Enter how many pages you want, starting from 1.");
+  }
+  for(let i = 1; i <= n; i++){
+    const inp = document.createElement("input");
+    inp.type = "number"; inp.min = 1; inp.max = total; inp.inputMode = "numeric";
+    inp.placeholder = "Page " + i; inp.setAttribute("aria-label", "Page number " + i + " of " + n);
+    box.appendChild(inp);
+  }
+  $("s3").hidden = false;
+  box.firstChild.focus();
+});
+
+$("go").addEventListener("click", async () => {
+  const msg = $("msg"), inputs = [...$("fields").querySelectorAll("input")];
+  let bad = false; const idx = [];
+  inputs.forEach(inp => {
+    const v = Number(inp.value);
+    const ok = inp.value !== "" && Number.isInteger(v) && v >= 1 && v <= total;
+    inp.classList.toggle("bad", !ok);
+    if(ok) idx.push(v - 1); else bad = true;
+  });
+  if(bad) return setMsg(msg, "Fix the highlighted boxes. Each page number must be between 1 and " + total + ".", "err");
+
+  $("go").disabled = true; setMsg(msg, "Creating your PDF…");
+  try{
+    const out = await PDFLib.PDFDocument.create();
+    const pages = await out.copyPages(srcDoc, idx);
+    pages.forEach(p => out.addPage(p));
+    const bytes = await out.save();
+    if(lastUrl) URL.revokeObjectURL(lastUrl);
+    lastUrl = URL.createObjectURL(new Blob([bytes], {type:"application/pdf"}));
+    const a = $("dl");
+    a.href = lastUrl; a.download = srcName + "-selected-pages.pdf";
+    a.textContent = "Download " + a.download;
+    a.hidden = false; a.className = "";
+    a.style.cssText = "display:inline-block;background:#0a7a3d;color:#fff;padding:11px 18px;border-radius:8px;font-weight:600;text-decoration:none";
+    setMsg(msg, "Done. " + idx.length + (idx.length === 1 ? " page" : " pages") + " saved in one PDF.", "ok");
+    a.click();
+  }catch(e){
+    setMsg(msg, "Something went wrong while creating the PDF. Try again with a different file.", "err");
+  }finally{ $("go").disabled = false; }
+});
+</script>
+</body>
+</html>
